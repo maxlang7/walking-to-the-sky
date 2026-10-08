@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Walking to the Sky in ASCII</title>
-<meta name="description" content="An animated ASCII night scene of Walking to the Sky at Carnegie Mellon.">
+<meta name="description" content="A 3D night scene of Walking to the Sky at Carnegie Mellon, rendered in ASCII.">
 <style>
   html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
   body { display: flex; align-items: center; justify-content: center; }
@@ -22,145 +22,323 @@
 <footer>Walking to the Sky, CMU &middot; after <a href="https://www.instagram.com/reels/DeLB9wtxJYI/">@ascii_and_pixels</a></footer>
 <script>
 'use strict';
+// A small 3D ray caster whose framebuffer is a grid of characters.
+// World units are metres, y is up, the pole stands at the origin and the camera mostly looks toward -z.
 const cv = document.getElementById('c'), ctx = cv.getContext('2d');
-
-// World is a grid of character cells. One row is 1 unit tall, one column ASPECT units wide.
-const COLS = 150, ROWS = 96, GROUND = 70, VIEW_ROWS = 86, ASPECT = 0.62;
-const CAM0 = [64, 46];            // wide-shot camera; parallax layers are aligned here
-const LAMP = [39, 41];            // light source inside the lamp head
-const POLE_BASE = [72, GROUND - 1], POLE_TOP_ROW = 12, POLE_SLOPE = 25 / 57;
-const LOOP = 19;
-
+const GW = 96, GH = 106, NC = GW * GH, LOOP = 18;
 const params = new URLSearchParams(location.search);
 const FREEZE = params.has('t') ? parseFloat(params.get('t')) : null;
 
-let W, H, CH, CW;
+let W, H, CW, CH;
 function resize() {
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   let h = innerHeight, w = h * 9 / 16;
   if (w > innerWidth) { w = innerWidth; h = w * 16 / 9; }
   cv.style.width = w + 'px'; cv.style.height = h + 'px';
   W = cv.width = Math.round(w * dpr); H = cv.height = Math.round(h * dpr);
-  CH = H / VIEW_ROWS; CW = CH * ASPECT;
+  CW = W / GW; CH = H / GH;
 }
 addEventListener('resize', resize); resize();
 
 const hash = (x, y) => { const s = Math.sin(x * 127.1 + y * 311.7) * 43758.5453; return s - Math.floor(s); };
-let seed = 7;
+let seed = 11;
 const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
-const poleX = y => POLE_BASE[0] + (POLE_BASE[1] - y) * POLE_SLOPE;
+const add = (a, b, k = 1) => [a[0] + b[0] * k, a[1] + b[1] * k, a[2] + b[2] * k];
+const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const norm = a => { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
+const mix = (a, b, u) => [a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u, a[2] + (b[2] - a[2]) * u];
 
-// ---------- foreground grid (lit by the lamp and the floodlights) ----------
-const N = COLS * ROWS;
-const fc = new Array(N).fill(''), fcol = new Float32Array(N * 3), fem = new Float32Array(N), ffl = new Float32Array(N);
-function put(x, y, c, col, em = 0, fl = 0) {
-  x = Math.round(x); y = Math.round(y);
-  if (x < 0 || y < 0 || x >= COLS || y >= ROWS) return;
-  const i = y * COLS + x;
-  fc[i] = c; fcol[i * 3] = col[0]; fcol[i * 3 + 1] = col[1]; fcol[i * 3 + 2] = col[2]; fem[i] = em; ffl[i] = fl;
-}
-
-const STEEL = [150, 170, 198], IRON = [120, 122, 135], AMBER = [255, 190, 96];
+// ---------- scene ----------
+const spheres = [], capsules = [], boxes = [], casters = [], lamps = [];
+const capsule = (a, b, r, col, ch = null, fl = 0) => {
+  const ba = sub(b, a), c = { a, b, r, col, ch, fl, bx: ba[0], by: ba[1], bz: ba[2], baba: dot(ba, ba) };
+  capsules.push(c); return c;
+};
+const STEEL = [150, 170, 198], IRON = [110, 112, 126], AMBER = [255, 190, 96], SKIN = [225, 190, 160], JEANS = [70, 82, 120];
 const CLOTHES = [[214, 84, 70], [232, 190, 80], [90, 140, 220], [120, 190, 120], [200, 120, 200], [230, 140, 70], [110, 190, 200]];
-const SKIN = [225, 190, 160];
 
-// lamp: post, arm and glowing head
-[
-  '      ######',
-  '   ############',
-  '  ###@@@@@@@@###',
-  ' ### @@@@@@@@@@',
-  '###   @@@@@@@',
-  '##',
-].forEach((row, j) => [...row].forEach((c, i) => {
-  if (c === '#') put(30 + i, 38 + j, '#', IRON);
-  if (c === '@') put(30 + i, 38 + j, '@', AMBER, 1);
-}));
-for (let y = 44; y < GROUND; y++) { put(30, y, '#', IRON); put(31, y, '#', IRON); }
+// the pole: 30 m of steel leaning 75 degrees
+const TILT = 75 * Math.PI / 180, PD = [Math.cos(TILT), Math.sin(TILT), 0], PN = [-Math.sin(TILT), Math.cos(TILT), 0];
+const POLE_R = .32, POLE_LEN = 30;
+casters.push(capsule([0, 0, 0], add([0, 0, 0], PD, POLE_LEN), POLE_R, STEEL, '#', 1));
 
-// the pole
-for (let y = POLE_TOP_ROW; y <= POLE_BASE[1]; y++) {
-  const x = Math.round(poleX(y));
-  put(x, y, '#', STEEL, 0, 1); put(x + 1, y, '#', STEEL, 0, 1);
-}
-// seven figures walking up it, leaning with the pole
-[16, 22, 28, 34, 40, 46, 52].forEach((yf, k) => {
-  const col = CLOTHES[k % CLOTHES.length], at = y => Math.round(poleX(y));
-  put(at(yf) - 2, yf, '/', [70, 80, 110], 0, 1); put(at(yf) - 1, yf, '\\', [70, 80, 110], 0, 1);
-  put(at(yf - 1) - 1, yf - 1, '#', col, 0, 1); put(at(yf - 1) - 2, yf - 1, k % 2 ? '-' : '/', col, 0, 1);
-  put(at(yf - 2) - 1, yf - 2, '#', col, 0, 1);
-  put(at(yf - 3) - 1, yf - 3, 'o', SKIN, 0, 1);
-});
-// three figures on the ground, looking up
-[[57, 0], [61, 1], [65, 2]].forEach(([x, k]) => {
-  const col = CLOTHES[(k + 3) % CLOTHES.length], y = GROUND - 1;
-  put(x, y, '/', [70, 80, 110], 0, .8); put(x + 2, y, '\\', [70, 80, 110], 0, .8);
-  put(x + 1, y - 1, '#', col, 0, .8);
-  put(x, y - 2, '/', col, 0, .8); put(x + 1, y - 2, '#', col, 0, .8); put(x + 2, y - 2, k === 1 ? '/' : '\\', col, 0, .8);
-  put(x + 1, y - 3, 'o', SKIN, 0, .8);
-});
-
-// ---------- background layers (sparse, self-coloured) ----------
-const stars = [], far = [], mid = [];
-for (let i = 0; i < 170; i++) stars.push({ x: rnd() * COLS, y: rnd() * 66, c: rnd() < .12 ? '+' : '.', ph: rnd() * 6.3, f: .4 + rnd() * 1.6, b: .25 + rnd() * .6 });
-
-function block(list, x0, y0, w, h, col, winCol, winP) {
-  for (let y = y0; y < y0 + h; y++) for (let x = x0; x < x0 + w; x++) {
-    const win = winCol && (x - x0) % 2 === 1 && (y - y0) % 2 === 1 && rnd() < winP;
-    list.push(win ? { x, y, c: 'o', col: winCol, ph: rnd() * 6.3, f: .05 + rnd() * .25 } : { x, y, c: '#', col });
+function figure(P, up, fwd, h, col, phase, fl) {
+  const side = cross(up, fwd), hip = add(P, up, .5 * h), sh = add(P, up, .82 * h);
+  capsule(hip, add(add(P, fwd, .17 * h * phase), side, .07 * h), .055 * h, JEANS, null, fl);
+  capsule(hip, add(add(P, fwd, -.17 * h * phase), side, -.07 * h), .055 * h, JEANS, null, fl);
+  const torso = capsule(hip, sh, .11 * h, col, '#', fl);
+  for (const k of [1, -1]) {
+    const s = add(sh, side, .15 * h * k);
+    capsule(s, add(add(s, up, -.3 * h), fwd, -.15 * h * phase * k), .04 * h, col, null, fl);
   }
+  spheres.push({ c: add(P, up, .94 * h), r: .1 * h, col: SKIN, ch: 'o', fl });
+  return torso;
 }
-// low Oakland skyline
-for (let x = 0; x < COLS;) {
-  const w = 3 + Math.floor(rnd() * 6), h = 3 + Math.floor(rnd() * 8);
-  const teal = rnd() < .2;
-  block(far, x, GROUND - h, w, h + 30, teal ? [22, 44, 48] : [26, 24, 36], teal ? [120, 200, 190] : [214, 160, 70], .22);
-  x += w + (rnd() < .3 ? 1 : 0);
-}
-// Cathedral of Learning: stepped tower with a blinking beacon
-{
-  const cx = 84, top = 34; let y = top;
-  [[1, 2], [3, 4], [5, 7], [7, 9], [9, 42]].forEach(([w, h]) => { block(far, cx - (w >> 1), y, w, h, [34, 31, 44], [226, 170, 78], .3); y += h; });
-  far.push({ x: cx, y: top - 1, c: '*', col: [255, 60, 50], beacon: true });
-}
-// Hamerschlag Hall tower
-{
-  const x0 = 50, top = 50;
-  ['   |', '  .#.', ' .###.', ' #####', ' #|#|#', ' #####'].forEach((row, j) => [...row].forEach((c, i) => {
-    if (c !== ' ') mid.push({ x: x0 + i, y: top + j, c, col: [70, 62, 56] });
-  }));
-  block(mid, x0, top + 6, 7, 60, [58, 42, 36], [230, 176, 90], .12);
-}
-// bare trees along the Cut
-[[14, 9], [47, 7], [100, 10], [118, 8], [134, 9]].forEach(([x, h]) => {
-  const col = [44, 40, 42], y0 = GROUND - 1;
-  for (let j = 0; j < h; j++) mid.push({ x, y: y0 - j, c: '|', col });
-  for (let j = 3; j < h + 2; j++) {
-    const s = Math.ceil((j - 2) / 2);
-    mid.push({ x: x - s, y: y0 - j, c: '\\', col }); mid.push({ x: x + s, y: y0 - j, c: '/', col });
-    if (j % 3 === 0) { mid.push({ x: x - s - 1, y: y0 - j - 1, c: '\\', col }); mid.push({ x: x + s + 1, y: y0 - j - 1, c: '/', col }); }
-  }
-});
-const BUS = [' .-----------.', ' |[][][][][] |', " '-O-------O-'"];
+// seven figures walk up the pole, standing perpendicular to it
+for (let k = 0; k < 7; k++) figure(add(add([0, 0, 0], PD, 9.5 + k * 3.1), PN, POLE_R), PN, PD, 2.6, CLOTHES[k], k % 2 ? 1 : -1, 1);
+// three more watch from the lawn
+[[-4.6, 1.6], [-6.2, -.6], [-3.9, -2.8]].forEach(([x, z], k) =>
+  casters.push(figure([x, 0, z], [0, 1, 0], norm([-x, 0, -z]), 2.2, CLOTHES[(k + 3) % 7], .35, .8)));
 
-// ---------- snow ----------
-const snow = [];
-for (let i = 0; i < 440; i++) snow.push({
-  x: rnd() * COLS, y: rnd() * (ROWS + 10), z: .5 + rnd() * .95, vy: 2.2 + rnd() * 3.4, vx: -.9 + rnd() * .6,
-  a: .4 + rnd() * 1.4, f: .3 + rnd() * .9, ph: rnd() * 6.3, s: .7 + rnd() * .9, star: rnd() < .07, b: .45 + rnd() * .5,
+// lamps along the walkway; lamps[0] is the hero lamp and the only one that casts shadows
+const pathZ = x => (6 - .3 * x) / .954;
+[-9, 13, 35, -31].forEach(x => {
+  const z = pathZ(x) - 2.6, top = [x, 8, z], tip = [x + 1.7, 8.7, z];
+  capsule([x, 0, z], top, .16, IRON, '#'); capsule(top, tip, .13, IRON, '#');
+  boxes.push({ mn: [x + .9, 8.35, z - .55], mx: [x + 3.5, 8.95, z + .55], kind: 1, col: IRON });
+  boxes.push({ mn: [x + 1.15, 7.85, z - .42], mx: [x + 3.25, 8.35, z + .42], kind: 2, col: AMBER });
+  lamps.push([x + 2.2, 7.75, z]);
+});
+
+// bare trees
+function branch(a, dir, len, r, depth) {
+  const c = capsule(a, add(a, dir, len), r, [64, 54, 50]);
+  for (let k = 0; depth > 0 && k < 3; k++)
+    branch(add(a, dir, len * (.55 + .45 * rnd())), norm([dir[0] * .7 + (rnd() - .5) * 1.3, dir[1] * .7 + .3 + rnd() * .3, dir[2] * .7 + (rnd() - .5) * 1.3]), len * .66, r * .6, depth - 1);
+  return c;
+}
+[[-19, -9], [13, -13], [22, 9], [-26, 13], [5, -26], [-12, -28], [34, -18]].forEach(([x, z]) => casters.push(branch([x, 0, z], [0, 1, 0], 3.2 + rnd() * 1.6, .28, 2)));
+
+// Oakland behind Forbes Avenue
+for (let x = -170; x < 170;) {
+  const w = 10 + rnd() * 16, h = 9 + rnd() * 26, z = -66 - rnd() * 34 - Math.abs(x) * .12;
+  boxes.push({ mn: [x, 0, z - 14], mx: [x + w, h, z], kind: 0, col: rnd() < .2 ? [26, 52, 56] : [34, 31, 46], seed: rnd() * 99, p: .1 + rnd() * .25 });
+  x += w + rnd() * 5;
+}
+for (const sx of [-1, 1]) for (let z = -50; z < 30; z += 26) {
+  const x = sx * (78 + rnd() * 22), w = 16;
+  boxes.push({ mn: [Math.min(x, x + sx * w), 0, z], mx: [Math.max(x, x + sx * w), 10 + rnd() * 14, z + 20], kind: 0, col: [34, 31, 46], seed: rnd() * 99, p: .15 });
+}
+// Cathedral of Learning, with its beacon
+[[30, 40], [24, 62], [18, 80], [12, 92], [6, 100]].forEach(([w, h]) =>
+  boxes.push({ mn: [60 - w / 2, 0, -170 - w / 2], mx: [60 + w / 2, h, -170 + w / 2], kind: 0, col: [44, 40, 56], seed: 5, p: .3 }));
+spheres.push({ c: [60, 103, -170], r: 2.4, col: [255, 60, 50], ch: '*', beacon: true });
+// Hamerschlag Hall
+boxes.push({ mn: [-66, 0, -92], mx: [-42, 20, -78], kind: 0, col: [60, 44, 38], seed: 3, p: .2 });
+boxes.push({ mn: [-57, 20, -89], mx: [-51, 33, -83], kind: 0, col: [60, 44, 38], seed: 4, p: .1 });
+spheres.push({ c: [-54, 34, -86], r: 3.6, col: [70, 60, 54], ch: '#', fog: true });
+// a bus on Forbes
+const bus = { mn: [0, .5, -41.3], mx: [0, 3.5, -38.7], kind: 3, col: [64, 96, 128] };
+boxes.push(bus);
+
+const stars = [];
+for (let i = 0; i < 260; i++) {
+  const a = rnd() * 6.283, y = .03 + rnd() * .95, h = Math.sqrt(1 - y * y);
+  stars.push({ d: [Math.cos(a) * h, y, Math.sin(a) * h], ph: rnd() * 6.3, f: .4 + rnd() * 1.6, b: .25 + rnd() * .55, c: rnd() < .12 ? '+' : '.' });
+}
+const SNOW = { x: 90, y: 42, z: 90, x0: -45, z0: -30 }, snow = [];
+for (let i = 0; i < 1900; i++) snow.push({
+  x: rnd() * SNOW.x, y: rnd() * SNOW.y, z: rnd() * SNOW.z, vy: 1.4 + rnd() * 1.6, vx: -.7 + rnd() * .5,
+  a: .2 + rnd() * .6, f: .3 + rnd() * .9, ph: rnd() * 6.3, s: .7 + rnd() * .8, star: rnd() < .07,
 });
 
 // ---------- camera ----------
-const KEYS = [
-  [0, 39, 43, 2.7], [2, 40, 43, 2.6], [5, 64, 46, 1], [6.5, 64, 46, 1],
-  [9, 67, 62, 2.4], [10, 68, 61, 2.4], [14, 93, 19, 2.6], [15.2, 94, 17, 2.6],
-  [17.6, 64, 46, 1], [LOOP, 64, 46, 1],
+const LAMP0 = () => lamps[0];
+const SHOTS = [
+  { t0: 0, t1: 2.2, p0: [-7, 9, 44], p1: [-5.5, 9.3, 44.5], g0: [-6.6, 7.6, 3], g1: [-6.6, 7.6, 3], z0: 2.7, z1: 2.55, fov: 50 },
+  { t0: 2.2, t1: 5.4, p0: [-5.5, 9.3, 44.5], p1: [-1, 10.5, 50], g0: [-6.6, 7.6, 3], g1: [1.5, 12.2, 0], z0: 2.55, z1: 1, fov: 50 },
+  { t0: 5.4, t1: 9.5, p0: [-1, 10.5, 50], p1: [26, 9, 43], g0: [1.5, 12.2, 0], g1: [2.5, 12.2, 0], z0: 1, z1: 1, fov: 50 },
+  { t0: 9.5, t1: 13.5, p0: [-14, 1.4, -2], p1: [-11, 1.9, -7], g0: [1.5, 9, 0], g1: [3, 12.5, 0], z0: 1, z1: 1, fov: 66 },
+  { t0: 13.5, t1: LOOP, p0: [-9, 26, 23], p1: [15, 30, 20], g0: [5, 19, 0], g1: [5.4, 20.5, 0], z0: 1, z1: 1, fov: 52 },
 ];
-function camera(t) {
-  let i = 0; while (i < KEYS.length - 2 && t >= KEYS[i + 1][0]) i++;
-  const a = KEYS[i], b = KEYS[i + 1];
-  let u = Math.min(1, Math.max(0, (t - a[0]) / (b[0] - a[0]))); u = u * u * (3 - 2 * u);
-  return [a[1] + (b[1] - a[1]) * u, a[2] + (b[2] - a[2]) * u, Math.exp(Math.log(a[3]) + (Math.log(b[3]) - Math.log(a[3])) * u)];
+const cam = { p: [0, 0, 0], r: [1, 0, 0], u: [0, 1, 0], f: [0, 0, -1], tv: 1, th: 1, z: 1 };
+function setCamera(t) {
+  const s = SHOTS.find(s => t < s.t1) || SHOTS[SHOTS.length - 1];
+  let u = Math.min(1, Math.max(0, (t - s.t0) / (s.t1 - s.t0))); u = u * u * (3 - 2 * u);
+  cam.p = mix(s.p0, s.p1, u);
+  cam.f = norm(sub(mix(s.g0, s.g1, u), cam.p));
+  cam.r = norm(cross(cam.f, [0, 1, 0])); cam.u = cross(cam.r, cam.f);
+  cam.z = Math.exp(Math.log(s.z0) + (Math.log(s.z1) - Math.log(s.z0)) * u);
+  cam.tv = Math.tan(s.fov * Math.PI / 360); cam.th = cam.tv * 9 / 16;
+}
+// world point -> [column, row, depth], or null when behind the camera
+function project(p) {
+  const x = p[0] - cam.p[0], y = p[1] - cam.p[1], z = p[2] - cam.p[2];
+  const zc = x * cam.f[0] + y * cam.f[1] + z * cam.f[2];
+  if (zc < .15) return null;
+  return [((x * cam.r[0] + y * cam.r[1] + z * cam.r[2]) / (zc * cam.th) + 1) / 2 * GW,
+          (1 - (x * cam.u[0] + y * cam.u[1] + z * cam.u[2]) / (zc * cam.tv)) / 2 * GH, zc];
+}
+
+// ---------- character framebuffer ----------
+const cd = new Float32Array(NC), cr = new Float32Array(NC), cg = new Float32Array(NC), cb = new Float32Array(NC);
+const cc = new Array(NC).fill(''), cbg = new Uint8Array(NC);
+const rx = new Float32Array(NC), ry = new Float32Array(NC), rz = new Float32Array(NC);
+let vi0, vi1, vj0, vj1, flick = 1, warm = 0, T = 0;
+
+// warm light arriving at a point from all lamps
+function lampLight(x, y, z) {
+  let s = 0;
+  for (let k = 0; k < lamps.length; k++) {
+    const L = lamps[k], dx = x - L[0], dy = y - L[1], dz = z - L[2];
+    s += (k ? 1 : flick) * 2.1 / (1 + (dx * dx + dy * dy + dz * dz) / 26);
+  }
+  return s;
+}
+function rayCapsule(ox, oy, oz, dx, dy, dz, c, r) {
+  const ax = ox - c.a[0], ay = oy - c.a[1], az = oz - c.a[2];
+  const bard = c.bx * dx + c.by * dy + c.bz * dz, baoa = c.bx * ax + c.by * ay + c.bz * az;
+  const rdoa = dx * ax + dy * ay + dz * az, oaoa = ax * ax + ay * ay + az * az;
+  const a = c.baba - bard * bard, b = c.baba * rdoa - baoa * bard, k = c.baba * oaoa - baoa * baoa - r * r * c.baba;
+  let h = b * b - a * k;
+  if (h < 0) return -1;
+  const t = (-b - Math.sqrt(h)) / a, y = baoa + t * bard;
+  if (y > 0 && y < c.baba) return t;
+  const ex = y <= 0 ? ax : ox - c.b[0], ey = y <= 0 ? ay : oy - c.b[1], ez = y <= 0 ? az : oz - c.b[2];
+  const b2 = dx * ex + dy * ey + dz * ez; h = b2 * b2 - (ex * ex + ey * ey + ez * ez - r * r);
+  return h > 0 ? -b2 - Math.sqrt(h) : -1;
+}
+function shadeSolid(i, t, ch, col, fl, x, y, z) {
+  const w = lampLight(x, y, z), k = .12 + fl * (.5 + .08 * Math.sin(T * 1.7 + y * .5));
+  cd[i] = t; cc[i] = ch; cbg[i] = 0;
+  cr[i] = col[0] * (k + w * 1.25); cg[i] = col[1] * (k + w); cb[i] = col[2] * (k + w * .68);
+}
+// clamp a cell rectangle to what is on screen; false when nothing is left
+let i0, i1, j0, j1;
+function clip(a, b, c, d) {
+  i0 = Math.max(vi0, Math.floor(a)); i1 = Math.min(vi1, Math.ceil(b)); j0 = Math.max(vj0, Math.floor(c)); j1 = Math.min(vj1, Math.ceil(d));
+  return i0 <= i1 && j0 <= j1;
+}
+
+const RAMP = ' .-~+*oxX%#';
+function render(t) {
+  T = t; setCamera(t);
+  const C = cam.p, ox = C[0], oy = C[1], oz = C[2], Z = cam.z;
+  const pixH = 2 * cam.th / GW, pixV = 2 * cam.tv / GH;
+  flick = .93 + .05 * Math.sin(t * 13.7) + .03 * Math.sin(t * 31.3 + 1) - (hash(Math.floor(t * 9), 3) > .96 ? .25 : 0);
+  vi0 = Math.max(0, Math.floor(GW / 2 - GW / 2 / Z)); vi1 = Math.min(GW - 1, Math.ceil(GW / 2 + GW / 2 / Z));
+  vj0 = Math.max(0, Math.floor(GH / 2 - GH / 2 / Z)); vj1 = Math.min(GH - 1, Math.ceil(GH / 2 + GH / 2 / Z));
+  bus.mn[0] = 110 - t / LOOP * 230; bus.mx[0] = bus.mn[0] + 11;
+  const L0 = LAMP0();
+
+  // rays, sky and the ground plane
+  for (let j = vj0; j <= vj1; j++) for (let i = vi0; i <= vi1; i++) {
+    const n = j * GW + i, px = ((i + .5) / GW * 2 - 1) * cam.th, py = (1 - (j + .5) / GH * 2) * cam.tv;
+    let dx = cam.f[0] + cam.r[0] * px + cam.u[0] * py, dy = cam.f[1] + cam.r[1] * px + cam.u[1] * py, dz = cam.f[2] + cam.r[2] * px + cam.u[2] * py;
+    const l = 1 / Math.sqrt(dx * dx + dy * dy + dz * dz); dx *= l; dy *= l; dz *= l;
+    rx[n] = dx; ry[n] = dy; rz[n] = dz; cd[n] = Infinity; cc[n] = ''; cbg[n] = 0;
+    if (dy > -1e-4) continue;
+    const tg = -oy / dy; if (tg > 420) continue;
+    const x = ox + dx * tg, z = oz + dz * tg;
+    // snow, the cleared walkway, and Forbes Avenue
+    const path = Math.abs(.3 * x + .954 * z - 6) < 1.5, road = z < -35 && z > -45;
+    let w = 0;
+    for (let k = 0; k < lamps.length; k++) {
+      const L = lamps[k], ex = x - L[0], ez = z - L[2], d2 = ex * ex + L[1] * L[1] + ez * ez;
+      let s = 2.4 * L[1] / Math.sqrt(d2) / (1 + d2 / 26);
+      if (k === 0 && s > .02) {   // shadows from the hero lamp
+        const len = Math.sqrt(d2), sx = -ex / len, sy = L[1] / len, sz = -ez / len;
+        for (const c of casters) { const ts = rayCapsule(x, .02, z, sx, sy, sz, c, c.r); if (ts > 0 && ts < len) { s *= .12; break; } }
+        s *= flick;
+      }
+      w += s;
+    }
+    const cool = .9 / (1 + (x * x + z * z) / 7), fog = Math.exp(-tg / 150);
+    const alb = path ? .42 : road ? .22 : 1, v = (.075 + w + cool * .8) * alb * fog;
+    let ch;
+    if (path || road) ch = v > .3 ? '=' : v > .09 ? '-' : v > .03 ? '.' : ' ';
+    else ch = RAMP[Math.max(0, Math.min(RAMP.length - 1, Math.floor(v * (RAMP.length - 1) + (hash(i, j) - .5) * 1.3)))];
+    cd[n] = tg; cc[n] = ch === ' ' ? '' : ch;
+    const a = alb * fog;
+    cr[n] = (16 + 235 * w + 150 * cool) * a; cg[n] = (18 + 190 * w + 170 * cool) * a; cb[n] = (30 + 125 * w + 215 * cool) * a;
+  }
+
+  // buildings, lamp heads, the bus
+  for (const B of boxes) {
+    let a = 1e9, b = -1e9, c = 1e9, d = -1e9, behind = 0;
+    for (let k = 0; k < 8; k++) {
+      const q = project([k & 1 ? B.mx[0] : B.mn[0], k & 2 ? B.mx[1] : B.mn[1], k & 4 ? B.mx[2] : B.mn[2]]);
+      if (!q) { behind++; continue; }
+      a = Math.min(a, q[0]); b = Math.max(b, q[0]); c = Math.min(c, q[1]); d = Math.max(d, q[1]);
+    }
+    if (behind === 8) continue;
+    if (behind) { a = c = -1e9; b = d = 1e9; }
+    if (!clip(a - 1, b, c - 1, d)) continue;
+    for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
+      const n = j * GW + i, dx = rx[n], dy = ry[n], dz = rz[n];
+      let tn = -1e9, tf = 1e9, ax = 0, t1, t2;
+      t1 = (B.mn[0] - ox) / dx; t2 = (B.mx[0] - ox) / dx; if (t1 > t2) { const s = t1; t1 = t2; t2 = s; } if (t1 > tn) { tn = t1; ax = 0; } if (t2 < tf) tf = t2;
+      t1 = (B.mn[1] - oy) / dy; t2 = (B.mx[1] - oy) / dy; if (t1 > t2) { const s = t1; t1 = t2; t2 = s; } if (t1 > tn) { tn = t1; ax = 1; } if (t2 < tf) tf = t2;
+      t1 = (B.mn[2] - oz) / dz; t2 = (B.mx[2] - oz) / dz; if (t1 > t2) { const s = t1; t1 = t2; t2 = s; } if (t1 > tn) { tn = t1; ax = 2; } if (t2 < tf) tf = t2;
+      if (!(tn < tf) || tn <= 0 || tn >= cd[n]) continue;
+      const x = ox + dx * tn, y = oy + dy * tn, z = oz + dz * tn, u = ax === 0 ? z : x;
+      if (B.kind === 2) {          // lamp lens
+        cd[n] = tn; cc[n] = '@'; cbg[n] = 1; cr[n] = B.col[0] * flick; cg[n] = B.col[1] * flick; cb[n] = B.col[2] * flick;
+      } else if (B.kind === 1) {   // lamp housing
+        shadeSolid(n, tn, '#', B.col, .25, x, y, z);
+      } else if (B.kind === 3) {   // bus
+        const win = ax !== 1 && y > 1.9 && y < 2.9 && (u / 1.7 - Math.floor(u / 1.7)) > .22;
+        if (win) { cd[n] = tn; cc[n] = '='; cbg[n] = 0; cr[n] = 230; cg[n] = 190; cb[n] = 110; }
+        else shadeSolid(n, tn, '#', B.col, .5, x, y, z);
+      } else {                     // building with lit windows
+        const fog = Math.exp(-tn / 330), iu = Math.floor(u / 3), iv = Math.floor(y / 3.4), fu = u / 3 - iu, fv = y / 3.4 - iv;
+        const lit = ax !== 1 && fu > .2 && fu < .8 && fv > .25 && fv < .8 && hash(iu + B.seed * 17.3, iv + B.seed) < B.p
+          && Math.sin(t * (.1 + hash(iu, iv) * .3) + iu * 7 + iv) > -.8;
+        cd[n] = tn; cbg[n] = 0;
+        if (lit) { cc[n] = 'o'; cr[n] = 232 * fog; cg[n] = 172 * fog; cb[n] = 82 * fog; }
+        else { const k = (ax === 0 ? 1.25 : 1) * fog * (1 + lampLight(x, y, z) * 2); cc[n] = '#'; cr[n] = B.col[0] * k; cg[n] = B.col[1] * k; cb[n] = B.col[2] * k; }
+      }
+    }
+  }
+
+  // pole, limbs, posts and branches
+  for (const c of capsules) {
+    const A = project(c.a), B = project(c.b);
+    if (!A && !B) continue;
+    const zc = A && B ? Math.min(A[2], B[2]) : (A || B)[2], re = Math.max(c.r, .55 * pixH * (A && B ? (A[2] + B[2]) / 2 : zc));
+    let ch = c.ch;
+    if (A && B) {
+      const ri = re / (pixH * zc) + 1, rj = re / (pixV * zc) + 1;
+      if (!clip(Math.min(A[0], B[0]) - ri, Math.max(A[0], B[0]) + ri, Math.min(A[1], B[1]) - rj, Math.max(A[1], B[1]) + rj)) continue;
+      if (!ch) { const sx = (B[0] - A[0]) * CW, sy = (B[1] - A[1]) * CH; ch = Math.abs(sx) < .45 * Math.abs(sy) ? '|' : Math.abs(sy) < .45 * Math.abs(sx) ? '-' : sx * sy > 0 ? '\\' : '/'; }
+    } else { clip(-1e9, 1e9, -1e9, 1e9); ch = ch || '|'; }
+    for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
+      const n = j * GW + i, tt = rayCapsule(ox, oy, oz, rx[n], ry[n], rz[n], c, re);
+      if (tt > 0 && tt < cd[n]) shadeSolid(n, tt, ch, c.col, c.fl, ox + rx[n] * tt, oy + ry[n] * tt, oz + rz[n] * tt);
+    }
+  }
+
+  // heads, the beacon, the cupola
+  for (const s of spheres) {
+    const q = project(s.c); if (!q) continue;
+    const re = Math.max(s.r, .55 * pixH * q[2]), ri = re / (pixH * q[2]) + 1, rj = re / (pixV * q[2]) + 1;
+    if (!clip(q[0] - ri, q[0] + ri, q[1] - rj, q[1] + rj)) continue;
+    const ex = ox - s.c[0], ey = oy - s.c[1], ez = oz - s.c[2], k = ex * ex + ey * ey + ez * ez - re * re;
+    for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
+      const n = j * GW + i, b = rx[n] * ex + ry[n] * ey + rz[n] * ez, h = b * b - k;
+      if (h < 0) continue;
+      const tt = -b - Math.sqrt(h); if (tt <= 0 || tt >= cd[n]) continue;
+      if (s.beacon) { const on = Math.sin(t * 3.3) > .2 ? 1 : .15; cd[n] = tt; cc[n] = s.ch; cbg[n] = 0; cr[n] = s.col[0] * on; cg[n] = s.col[1] * on; cb[n] = s.col[2] * on; }
+      else if (s.fog) { const f = Math.exp(-tt / 330); cd[n] = tt; cc[n] = s.ch; cbg[n] = 0; cr[n] = s.col[0] * f; cg[n] = s.col[1] * f; cb[n] = s.col[2] * f; }
+      else shadeSolid(n, tt, s.ch, s.col, s.fl, ox + rx[n] * tt, oy + ry[n] * tt, oz + rz[n] * tt);
+    }
+  }
+
+  // light hanging in the air around each lamp
+  for (let k = 0; k < lamps.length; k++) {
+    const L = lamps[k], q = project(L); if (!q) continue;
+    const vx = L[0] - ox, vy = L[1] - oy, vz = L[2] - oz, vv = vx * vx + vy * vy + vz * vz;
+    const R = 9, ri = R / (pixH * q[2]) + 1, rj = R / (pixV * q[2]) + 1;
+    if (!clip(q[0] - ri, q[0] + ri, q[1] - rj, q[1] + rj)) continue;
+    for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
+      const n = j * GW + i; if (cc[n] && cc[n] !== '.') continue;
+      const tp = vx * rx[n] + vy * ry[n] + vz * rz[n]; if (tp < 0 || cd[n] < tp) continue;
+      const g = (k ? 1 : flick) / (1 + (vv - tp * tp) / 3.2); if (g < .055) continue;
+      const b = Math.min(1, g * 1.5) * (.75 + .25 * hash(i + Math.floor(t * 6), j));
+      if (cc[n] === '.' && cr[n] > 235 * b) continue;
+      cc[n] = '.'; cr[n] = 235 * b; cg[n] = 180 * b; cb[n] = 96 * b;
+    }
+  }
+  for (const s of stars) {
+    const q = project(add(C, s.d, 100)); if (!q) continue;
+    const i = Math.floor(q[0]), j = Math.floor(q[1]);
+    if (i < vi0 || i > vi1 || j < vj0 || j > vj1) continue;
+    const n = j * GW + i; if (cc[n] || cd[n] < Infinity) continue;
+    const b = s.b * (.6 + .4 * Math.sin(t * s.f + s.ph));
+    cc[n] = s.c; cr[n] = 150 * b; cg[n] = 165 * b; cb[n] = 210 * b;
+  }
 }
 
 // ---------- drawing ----------
@@ -172,110 +350,44 @@ function style(r, g, b) {
   if (!s) { s = `rgb(${r & 248},${g & 248},${b & 248})`; styleCache.set(k, s); }
   return s;
 }
-const RAMP = ' .-~+*oxX%#';
-
-function frame(t) {
-  const [cx, cy, z] = camera(t);
-  const cw = CW * z, ch = CH * z;
-  const sx = (x, p) => W / 2 + (x + .5 + (cx - CAM0[0]) * (1 - p) - cx) * cw;
-  const sy = (y, p) => H / 2 + (y + .5 + (cy - CAM0[1]) * (1 - p) - cy) * ch;
-  const flick = .93 + .05 * Math.sin(t * 13.7) + .03 * Math.sin(t * 31.3 + 1) - (hash(Math.floor(t * 9), 3) > .96 ? .25 : 0);
-  const lampAt = (x, y) => { const dx = (x - LAMP[0]) * ASPECT, dy = y - LAMP[1]; return flick / (1 + (dx * dx + dy * dy) / 40); };
-
+const FONT = 'ui-monospace, "DejaVu Sans Mono", Menlo, Consolas, monospace';
+function frame(t, clock) {
+  render(t);
+  const Z = cam.z, cw = CW * Z, ch = CH * Z;
   const sky = ctx.createLinearGradient(0, 0, 0, H);
   sky.addColorStop(0, '#02030a'); sky.addColorStop(1, '#070812');
   ctx.fillStyle = sky; ctx.fillRect(0, 0, W, H);
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.font = `bold ${ch * .95}px ui-monospace, "DejaVu Sans Mono", Menlo, Consolas, monospace`;
-
-  const sparse = (list, p) => {
-    for (const o of list) {
-      const X = sx(o.x, p), Y = sy(o.y, p);
-      if (X < -cw || X > W + cw || Y < -ch || Y > H + ch) continue;
-      let k = 1;
-      if (o.beacon) k = Math.sin(t * 3.3) > .2 ? 1 : .12;
-      else if (o.ph !== undefined) k = Math.sin(t * o.f + o.ph) > -.75 ? .85 + .15 * Math.sin(t * 5 + o.ph) : .12;
-      ctx.fillStyle = style(o.col[0] * k, o.col[1] * k, o.col[2] * k);
-      ctx.fillText(o.c, X, Y);
-    }
-  };
-
-  for (const s of stars) {
-    const X = sx(s.x, .08), Y = sy(s.y, .08);
-    if (X < 0 || X > W || Y < 0 || Y > H) continue;
-    const k = s.b * (.6 + .4 * Math.sin(t * s.f + s.ph));
-    ctx.fillStyle = style(150 * k, 165 * k, 210 * k); ctx.fillText(s.c, X, Y);
-  }
-  sparse(far, .5);
-  sparse(mid, .7);
-
-  // a bus heading down Forbes
-  const busX = 175 - (t * 11) % 240;
-  BUS.forEach((row, j) => [...row].forEach((c, i) => {
-    if (c === ' ') return;
-    const X = sx(busX + i, .8), Y = sy(GROUND - 3 + j, .8);
-    if (X < -cw || X > W + cw) return;
-    ctx.fillStyle = c === '[' || c === ']' ? style(226, 186, 104) : c === 'O' ? style(40, 40, 46) : style(64, 92, 120);
-    ctx.fillText(c, X, Y);
-  }));
-
-  // ground plane hides the feet of everything behind it
-  const gy = sy(GROUND, 1) - ch / 2;
-  ctx.fillStyle = '#05060c'; ctx.fillRect(0, gy, W, H - gy);
-
-  // foreground cells
-  const x0 = Math.max(0, Math.floor(cx - W / 2 / cw) - 1), x1 = Math.min(COLS - 1, Math.ceil(cx + W / 2 / cw) + 1);
-  const y0 = Math.max(0, Math.floor(cy - H / 2 / ch) - 1), y1 = Math.min(ROWS - 1, Math.ceil(cy + H / 2 / ch) + 1);
-  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
-    const i = y * COLS + x, X = sx(x, 1), Y = sy(y, 1), L = lampAt(x, y);
-    if (fc[i]) {
-      let r = fcol[i * 3], g = fcol[i * 3 + 1], b = fcol[i * 3 + 2];
-      if (fem[i]) {
-        ctx.fillStyle = style(r * .42 * flick, g * .36 * flick, b * .3 * flick);
-        ctx.fillRect(X - cw / 2, Y - ch / 2, cw + 1, ch + 1);
-        ctx.fillStyle = style(r * flick, g * flick, b * flick);
-      } else {
-        const k = .14 + ffl[i] * (.5 + .1 * Math.sin(t * 1.7 + y * .45));
-        ctx.fillStyle = style(r * (k + L * 1.3), g * (k + L * 1.05), b * (k + L * .7));
-      }
-      ctx.fillText(fc[i], X, Y);
-    } else if (y >= GROUND) {
-      // snow-covered lawn: warm pool under the lamp, cool pool from the floodlights at the pole base
-      let dx = (x - LAMP[0] - 2) * ASPECT, dz = (y - GROUND - 5) * 2.4;
-      const warm = flick * 1.15 / (1 + (dx * dx + dz * dz) / 120);
-      dx = (x - POLE_BASE[0]) * ASPECT; dz = (y - GROUND - 1) * 2.4;
-      const cool = .75 / (1 + (dx * dx + dz * dz) / 26);
-      const v = .07 + warm + cool * .8, n = hash(x, y);
-      const c = RAMP[Math.max(0, Math.min(RAMP.length - 1, Math.floor(v * (RAMP.length - 1) + (n - .5) * 1.3)))];
-      if (c === ' ') continue;
-      ctx.fillStyle = style(16 + 235 * warm + 150 * cool, 18 + 190 * warm + 170 * cool, 30 + 125 * warm + 215 * cool);
-      ctx.fillText(c, X, Y);
-    } else if (L > .05) {
-      // light hanging in the air
-      const k = Math.min(1, L * 1.5) * (.75 + .25 * hash(x + Math.floor(t * 6), y));
-      ctx.fillStyle = style(235 * k, 180 * k, 96 * k);
-      ctx.fillText('.', X, Y);
-    }
+  ctx.font = `bold ${ch * .95}px ${FONT}`;
+  for (let j = vj0; j <= vj1; j++) for (let i = vi0; i <= vi1; i++) {
+    const n = j * GW + i; if (!cc[n]) continue;
+    const X = W / 2 + (i + .5 - GW / 2) * cw, Y = H / 2 + (j + .5 - GH / 2) * ch;
+    if (cbg[n]) { ctx.fillStyle = style(cr[n] * .42, cg[n] * .36, cb[n] * .3); ctx.fillRect(X - cw / 2, Y - ch / 2, cw + 1, ch + 1); }
+    ctx.fillStyle = style(cr[n], cg[n], cb[n]);
+    ctx.fillText(cc[n], X, Y);
   }
 
-  // snow
+  // snow lives in the 3D scene: it is depth tested against the characters and lit by the lamps
+  const C = cam.p;
   for (const p of snow) {
-    const wy = (p.y + p.vy * t) % (ROWS + 10) - 5;
-    const wx = (((p.x + p.vx * t + Math.sin(t * p.f + p.ph) * p.a) % COLS) + COLS) % COLS;
-    const X = sx(wx, p.z), Y = sy(wy, p.z);
-    if (X < 0 || X > W || Y < 0 || Y > H || (wy > GROUND + 14 && p.z < 1)) continue;
-    const L = lampAt(wx, wy), k = Math.min(1.2, p.b * .55 + L * 1.6);
-    ctx.fillStyle = style(215 * k + 60 * L, 215 * k + 20 * L, 225 * k - 40 * L);
-    if (p.star) {
-      ctx.font = `${ch * p.z * 1.25}px ui-monospace, "DejaVu Sans Mono", Menlo, Consolas, monospace`;
+    const y = SNOW.y - (((p.y + p.vy * clock) % SNOW.y) + SNOW.y) % SNOW.y;
+    const x = SNOW.x0 + (((p.x + p.vx * clock + Math.sin(clock * p.f + p.ph) * p.a) % SNOW.x) + SNOW.x) % SNOW.x;
+    const z = SNOW.z0 + p.z, q = project([x, y, z]); if (!q) continue;
+    const i = Math.floor(q[0]), j = Math.floor(q[1]);
+    if (i < vi0 || i > vi1 || j < vj0 || j > vj1) continue;
+    const dist = Math.hypot(x - C[0], y - C[1], z - C[2]);
+    if (dist > cd[j * GW + i]) continue;
+    const w = lampLight(x, y, z), k = Math.min(1.25, .45 + .25 * p.s + w * .9) * Math.min(1, 14 / dist + .35);
+    const X = W / 2 + (q[0] - GW / 2) * cw, Y = H / 2 + (q[1] - GH / 2) * ch;
+    ctx.fillStyle = style(215 * k + 50 * w, 215 * k + 15 * w, 225 * k - 35 * w);
+    if (p.star && dist < 30) {
+      ctx.font = `${Math.min(ch * 2.4, Math.max(ch * .9, ch * 22 / dist))}px ${FONT}`;
       ctx.fillText('*', X, Y);
     } else {
-      const r = Math.max(.6, ch * p.z * p.s * .1);
-      ctx.beginPath(); ctx.arc(X, Y, r, 0, 6.2832); ctx.fill();
+      ctx.beginPath(); ctx.arc(X, Y, Math.min(ch * .6, Math.max(ch * .085, ch * 2.6 * p.s / dist)), 0, 6.2832); ctx.fill();
     }
   }
 
-  // vignette and loop fade
   const vg = ctx.createRadialGradient(W / 2, H / 2, H * .3, W / 2, H / 2, H * .62);
   vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,.85)');
   ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
@@ -285,8 +397,9 @@ function frame(t) {
 
 const start = performance.now();
 function tick(now) {
-  frame(FREEZE !== null ? FREEZE : ((now - start) / 1000) % LOOP);
-  if (FREEZE === null) requestAnimationFrame(tick);
+  const clock = (now - start) / 1000;
+  if (FREEZE !== null) frame(FREEZE, FREEZE);
+  else { frame(clock % LOOP, clock); requestAnimationFrame(tick); }
 }
 requestAnimationFrame(tick);
 </script>
