@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Walking to the Sky in ASCII</title>
+<meta name="description" content="An animated ASCII night scene of Walking to the Sky at Carnegie Mellon.">
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; }
+  canvas { display: block; }
+  footer {
+    position: fixed; left: 0; right: 0; bottom: 6px; text-align: center;
+    font: 11px ui-monospace, "DejaVu Sans Mono", Menlo, Consolas, monospace;
+    color: #3a3a44; pointer-events: none;
+  }
+  footer a { color: #55556a; pointer-events: auto; text-decoration: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<footer>Walking to the Sky, CMU &middot; after <a href="https://www.instagram.com/reels/DeLB9wtxJYI/">@ascii_and_pixels</a></footer>
+<script>
+'use strict';
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+
+// World is a grid of character cells. One row is 1 unit tall, one column ASPECT units wide.
+const COLS = 150, ROWS = 96, GROUND = 70, VIEW_ROWS = 86, ASPECT = 0.62;
+const CAM0 = [64, 46];            // wide-shot camera; parallax layers are aligned here
+const LAMP = [39, 41];            // light source inside the lamp head
+const POLE_BASE = [72, GROUND - 1], POLE_TOP_ROW = 12, POLE_SLOPE = 25 / 57;
+const LOOP = 19;
+
+const params = new URLSearchParams(location.search);
+const FREEZE = params.has('t') ? parseFloat(params.get('t')) : null;
+
+let W, H, CH, CW;
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  let h = innerHeight, w = h * 9 / 16;
+  if (w > innerWidth) { w = innerWidth; h = w * 16 / 9; }
+  cv.style.width = w + 'px'; cv.style.height = h + 'px';
+  W = cv.width = Math.round(w * dpr); H = cv.height = Math.round(h * dpr);
+  CH = H / VIEW_ROWS; CW = CH * ASPECT;
+}
+addEventListener('resize', resize); resize();
+
+const hash = (x, y) => { const s = Math.sin(x * 127.1 + y * 311.7) * 43758.5453; return s - Math.floor(s); };
+let seed = 7;
+const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
+const poleX = y => POLE_BASE[0] + (POLE_BASE[1] - y) * POLE_SLOPE;
+
+// ---------- foreground grid (lit by the lamp and the floodlights) ----------
+const N = COLS * ROWS;
+const fc = new Array(N).fill(''), fcol = new Float32Array(N * 3), fem = new Float32Array(N), ffl = new Float32Array(N);
+function put(x, y, c, col, em = 0, fl = 0) {
+  x = Math.round(x); y = Math.round(y);
+  if (x < 0 || y < 0 || x >= COLS || y >= ROWS) return;
+  const i = y * COLS + x;
+  fc[i] = c; fcol[i * 3] = col[0]; fcol[i * 3 + 1] = col[1]; fcol[i * 3 + 2] = col[2]; fem[i] = em; ffl[i] = fl;
+}
+
+const STEEL = [150, 170, 198], IRON = [120, 122, 135], AMBER = [255, 190, 96];
+const CLOTHES = [[214, 84, 70], [232, 190, 80], [90, 140, 220], [120, 190, 120], [200, 120, 200], [230, 140, 70], [110, 190, 200]];
+const SKIN = [225, 190, 160];
+
+// lamp: post, arm and glowing head
+[
+  '      ######',
+  '   ############',
+  '  ###@@@@@@@@###',
+  ' ### @@@@@@@@@@',
+  '###   @@@@@@@',
+  '##',
+].forEach((row, j) => [...row].forEach((c, i) => {
+  if (c === '#') put(30 + i, 38 + j, '#', IRON);
+  if (c === '@') put(30 + i, 38 + j, '@', AMBER, 1);
+}));
+for (let y = 44; y < GROUND; y++) { put(30, y, '#', IRON); put(31, y, '#', IRON); }
+
+// the pole
+for (let y = POLE_TOP_ROW; y <= POLE_BASE[1]; y++) {
+  const x = Math.round(poleX(y));
+  put(x, y, '#', STEEL, 0, 1); put(x + 1, y, '#', STEEL, 0, 1);
+}
+// seven figures walking up it, leaning with the pole
+[16, 22, 28, 34, 40, 46, 52].forEach((yf, k) => {
+  const col = CLOTHES[k % CLOTHES.length], at = y => Math.round(poleX(y));
+  put(at(yf) - 2, yf, '/', [70, 80, 110], 0, 1); put(at(yf) - 1, yf, '\\', [70, 80, 110], 0, 1);
+  put(at(yf - 1) - 1, yf - 1, '#', col, 0, 1); put(at(yf - 1) - 2, yf - 1, k % 2 ? '-' : '/', col, 0, 1);
+  put(at(yf - 2) - 1, yf - 2, '#', col, 0, 1);
+  put(at(yf - 3) - 1, yf - 3, 'o', SKIN, 0, 1);
+});
+// three figures on the ground, looking up
+[[57, 0], [61, 1], [65, 2]].forEach(([x, k]) => {
+  const col = CLOTHES[(k + 3) % CLOTHES.length], y = GROUND - 1;
+  put(x, y, '/', [70, 80, 110], 0, .8); put(x + 2, y, '\\', [70, 80, 110], 0, .8);
+  put(x + 1, y - 1, '#', col, 0, .8);
+  put(x, y - 2, '/', col, 0, .8); put(x + 1, y - 2, '#', col, 0, .8); put(x + 2, y - 2, k === 1 ? '/' : '\\', col, 0, .8);
+  put(x + 1, y - 3, 'o', SKIN, 0, .8);
+});
+
+// ---------- background layers (sparse, self-coloured) ----------
+const stars = [], far = [], mid = [];
+for (let i = 0; i < 170; i++) stars.push({ x: rnd() * COLS, y: rnd() * 66, c: rnd() < .12 ? '+' : '.', ph: rnd() * 6.3, f: .4 + rnd() * 1.6, b: .25 + rnd() * .6 });
+
+function block(list, x0, y0, w, h, col, winCol, winP) {
+  for (let y = y0; y < y0 + h; y++) for (let x = x0; x < x0 + w; x++) {
+    const win = winCol && (x - x0) % 2 === 1 && (y - y0) % 2 === 1 && rnd() < winP;
+    list.push(win ? { x, y, c: 'o', col: winCol, ph: rnd() * 6.3, f: .05 + rnd() * .25 } : { x, y, c: '#', col });
+  }
+}
+// low Oakland skyline
+for (let x = 0; x < COLS;) {
+  const w = 3 + Math.floor(rnd() * 6), h = 3 + Math.floor(rnd() * 8);
+  const teal = rnd() < .2;
+  block(far, x, GROUND - h, w, h + 30, teal ? [22, 44, 48] : [26, 24, 36], teal ? [120, 200, 190] : [214, 160, 70], .22);
+  x += w + (rnd() < .3 ? 1 : 0);
+}
+// Cathedral of Learning: stepped tower with a blinking beacon
+{
+  const cx = 84, top = 34; let y = top;
+  [[1, 2], [3, 4], [5, 7], [7, 9], [9, 42]].forEach(([w, h]) => { block(far, cx - (w >> 1), y, w, h, [34, 31, 44], [226, 170, 78], .3); y += h; });
+  far.push({ x: cx, y: top - 1, c: '*', col: [255, 60, 50], beacon: true });
+}
+// Hamerschlag Hall tower
+{
+  const x0 = 50, top = 50;
+  ['   |', '  .#.', ' .###.', ' #####', ' #|#|#', ' #####'].forEach((row, j) => [...row].forEach((c, i) => {
+    if (c !== ' ') mid.push({ x: x0 + i, y: top + j, c, col: [70, 62, 56] });
+  }));
+  block(mid, x0, top + 6, 7, 60, [58, 42, 36], [230, 176, 90], .12);
+}
+// bare trees along the Cut
+[[14, 9], [47, 7], [100, 10], [118, 8], [134, 9]].forEach(([x, h]) => {
+  const col = [44, 40, 42], y0 = GROUND - 1;
+  for (let j = 0; j < h; j++) mid.push({ x, y: y0 - j, c: '|', col });
+  for (let j = 3; j < h + 2; j++) {
+    const s = Math.ceil((j - 2) / 2);
+    mid.push({ x: x - s, y: y0 - j, c: '\\', col }); mid.push({ x: x + s, y: y0 - j, c: '/', col });
+    if (j % 3 === 0) { mid.push({ x: x - s - 1, y: y0 - j - 1, c: '\\', col }); mid.push({ x: x + s + 1, y: y0 - j - 1, c: '/', col }); }
+  }
+});
+const BUS = [' .-----------.', ' |[][][][][] |', " '-O-------O-'"];
+
+// ---------- snow ----------
+const snow = [];
+for (let i = 0; i < 440; i++) snow.push({
+  x: rnd() * COLS, y: rnd() * (ROWS + 10), z: .5 + rnd() * .95, vy: 2.2 + rnd() * 3.4, vx: -.9 + rnd() * .6,
+  a: .4 + rnd() * 1.4, f: .3 + rnd() * .9, ph: rnd() * 6.3, s: .7 + rnd() * .9, star: rnd() < .07, b: .45 + rnd() * .5,
+});
+
+// ---------- camera ----------
+const KEYS = [
+  [0, 39, 43, 2.7], [2, 40, 43, 2.6], [5, 64, 46, 1], [6.5, 64, 46, 1],
+  [9, 67, 62, 2.4], [10, 68, 61, 2.4], [14, 93, 19, 2.6], [15.2, 94, 17, 2.6],
+  [17.6, 64, 46, 1], [LOOP, 64, 46, 1],
+];
+function camera(t) {
+  let i = 0; while (i < KEYS.length - 2 && t >= KEYS[i + 1][0]) i++;
+  const a = KEYS[i], b = KEYS[i + 1];
+  let u = Math.min(1, Math.max(0, (t - a[0]) / (b[0] - a[0]))); u = u * u * (3 - 2 * u);
+  return [a[1] + (b[1] - a[1]) * u, a[2] + (b[2] - a[2]) * u, Math.exp(Math.log(a[3]) + (Math.log(b[3]) - Math.log(a[3])) * u)];
+}
+
+// ---------- drawing ----------
+const styleCache = new Map();
+function style(r, g, b) {
+  r = r > 255 ? 255 : r < 0 ? 0 : r | 0; g = g > 255 ? 255 : g < 0 ? 0 : g | 0; b = b > 255 ? 255 : b < 0 ? 0 : b | 0;
+  const k = (r >> 3) << 10 | (g >> 3) << 5 | (b >> 3);
+  let s = styleCache.get(k);
+  if (!s) { s = `rgb(${r & 248},${g & 248},${b & 248})`; styleCache.set(k, s); }
+  return s;
+}
+const RAMP = ' .-~+*oxX%#';
+
+function frame(t) {
+  const [cx, cy, z] = camera(t);
+  const cw = CW * z, ch = CH * z;
+  const sx = (x, p) => W / 2 + (x + .5 + (cx - CAM0[0]) * (1 - p) - cx) * cw;
+  const sy = (y, p) => H / 2 + (y + .5 + (cy - CAM0[1]) * (1 - p) - cy) * ch;
+  const flick = .93 + .05 * Math.sin(t * 13.7) + .03 * Math.sin(t * 31.3 + 1) - (hash(Math.floor(t * 9), 3) > .96 ? .25 : 0);
+  const lampAt = (x, y) => { const dx = (x - LAMP[0]) * ASPECT, dy = y - LAMP[1]; return flick / (1 + (dx * dx + dy * dy) / 40); };
+
+  const sky = ctx.createLinearGradient(0, 0, 0, H);
+  sky.addColorStop(0, '#02030a'); sky.addColorStop(1, '#070812');
+  ctx.fillStyle = sky; ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = `bold ${ch * .95}px ui-monospace, "DejaVu Sans Mono", Menlo, Consolas, monospace`;
+
+  const sparse = (list, p) => {
+    for (const o of list) {
+      const X = sx(o.x, p), Y = sy(o.y, p);
+      if (X < -cw || X > W + cw || Y < -ch || Y > H + ch) continue;
+      let k = 1;
+      if (o.beacon) k = Math.sin(t * 3.3) > .2 ? 1 : .12;
+      else if (o.ph !== undefined) k = Math.sin(t * o.f + o.ph) > -.75 ? .85 + .15 * Math.sin(t * 5 + o.ph) : .12;
+      ctx.fillStyle = style(o.col[0] * k, o.col[1] * k, o.col[2] * k);
+      ctx.fillText(o.c, X, Y);
+    }
+  };
+
+  for (const s of stars) {
+    const X = sx(s.x, .08), Y = sy(s.y, .08);
+    if (X < 0 || X > W || Y < 0 || Y > H) continue;
+    const k = s.b * (.6 + .4 * Math.sin(t * s.f + s.ph));
+    ctx.fillStyle = style(150 * k, 165 * k, 210 * k); ctx.fillText(s.c, X, Y);
+  }
+  sparse(far, .5);
+  sparse(mid, .7);
+
+  // a bus heading down Forbes
+  const busX = 175 - (t * 11) % 240;
+  BUS.forEach((row, j) => [...row].forEach((c, i) => {
+    if (c === ' ') return;
+    const X = sx(busX + i, .8), Y = sy(GROUND - 3 + j, .8);
+    if (X < -cw || X > W + cw) return;
+    ctx.fillStyle = c === '[' || c === ']' ? style(226, 186, 104) : c === 'O' ? style(40, 40, 46) : style(64, 92, 120);
+    ctx.fillText(c, X, Y);
+  }));
+
+  // ground plane hides the feet of everything behind it
+  const gy = sy(GROUND, 1) - ch / 2;
+  ctx.fillStyle = '#05060c'; ctx.fillRect(0, gy, W, H - gy);
+
+  // foreground cells
+  const x0 = Math.max(0, Math.floor(cx - W / 2 / cw) - 1), x1 = Math.min(COLS - 1, Math.ceil(cx + W / 2 / cw) + 1);
+  const y0 = Math.max(0, Math.floor(cy - H / 2 / ch) - 1), y1 = Math.min(ROWS - 1, Math.ceil(cy + H / 2 / ch) + 1);
+  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+    const i = y * COLS + x, X = sx(x, 1), Y = sy(y, 1), L = lampAt(x, y);
+    if (fc[i]) {
+      let r = fcol[i * 3], g = fcol[i * 3 + 1], b = fcol[i * 3 + 2];
+      if (fem[i]) {
+        ctx.fillStyle = style(r * .42 * flick, g * .36 * flick, b * .3 * flick);
+        ctx.fillRect(X - cw / 2, Y - ch / 2, cw + 1, ch + 1);
+        ctx.fillStyle = style(r * flick, g * flick, b * flick);
+      } else {
+        const k = .14 + ffl[i] * (.5 + .1 * Math.sin(t * 1.7 + y * .45));
+        ctx.fillStyle = style(r * (k + L * 1.3), g * (k + L * 1.05), b * (k + L * .7));
+      }
+      ctx.fillText(fc[i], X, Y);
+    } else if (y >= GROUND) {
+      // snow-covered lawn: warm pool under the lamp, cool pool from the floodlights at the pole base
+      let dx = (x - LAMP[0] - 2) * ASPECT, dz = (y - GROUND - 5) * 2.4;
+      const warm = flick * 1.15 / (1 + (dx * dx + dz * dz) / 120);
+      dx = (x - POLE_BASE[0]) * ASPECT; dz = (y - GROUND - 1) * 2.4;
+      const cool = .75 / (1 + (dx * dx + dz * dz) / 26);
+      const v = .07 + warm + cool * .8, n = hash(x, y);
+      const c = RAMP[Math.max(0, Math.min(RAMP.length - 1, Math.floor(v * (RAMP.length - 1) + (n - .5) * 1.3)))];
+      if (c === ' ') continue;
+      ctx.fillStyle = style(16 + 235 * warm + 150 * cool, 18 + 190 * warm + 170 * cool, 30 + 125 * warm + 215 * cool);
+      ctx.fillText(c, X, Y);
+    } else if (L > .05) {
+      // light hanging in the air
+      const k = Math.min(1, L * 1.5) * (.75 + .25 * hash(x + Math.floor(t * 6), y));
+      ctx.fillStyle = style(235 * k, 180 * k, 96 * k);
+      ctx.fillText('.', X, Y);
+    }
+  }
+
+  // snow
+  for (const p of snow) {
+    const wy = (p.y + p.vy * t) % (ROWS + 10) - 5;
+    const wx = (((p.x + p.vx * t + Math.sin(t * p.f + p.ph) * p.a) % COLS) + COLS) % COLS;
+    const X = sx(wx, p.z), Y = sy(wy, p.z);
+    if (X < 0 || X > W || Y < 0 || Y > H || (wy > GROUND + 14 && p.z < 1)) continue;
+    const L = lampAt(wx, wy), k = Math.min(1.2, p.b * .55 + L * 1.6);
+    ctx.fillStyle = style(215 * k + 60 * L, 215 * k + 20 * L, 225 * k - 40 * L);
+    if (p.star) {
+      ctx.font = `${ch * p.z * 1.25}px ui-monospace, "DejaVu Sans Mono", Menlo, Consolas, monospace`;
+      ctx.fillText('*', X, Y);
+    } else {
+      const r = Math.max(.6, ch * p.z * p.s * .1);
+      ctx.beginPath(); ctx.arc(X, Y, r, 0, 6.2832); ctx.fill();
+    }
+  }
+
+  // vignette and loop fade
+  const vg = ctx.createRadialGradient(W / 2, H / 2, H * .3, W / 2, H / 2, H * .62);
+  vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,.85)');
+  ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
+  const fade = Math.max(0, 1 - Math.min(t, LOOP - t) / .45);
+  if (fade > 0) { ctx.fillStyle = `rgba(0,0,0,${fade})`; ctx.fillRect(0, 0, W, H); }
+}
+
+const start = performance.now();
+function tick(now) {
+  frame(FREEZE !== null ? FREEZE : ((now - start) / 1000) % LOOP);
+  if (FREEZE === null) requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+</script>
+</body>
+</html>
